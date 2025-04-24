@@ -1,0 +1,30 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - MONGO_URI=mongodb://mongo:27017/
+      - DB_NAME=${DB_NAME}
+      - COLLECTION_NAME=${COLLECTION_NAME}
+      - SOURCE_DATA_LAKE_DIR=${SOURCE_DATA_LAKE_DIR}
+      - OUTPUT_DIR=${OUTPUT_DIR}
+      - POST_PROCESS_DIR=${POST_PROCESS_DIR}
+    volumes:
+      - .:/app
+      - "${DATA_LAKE_DIR}/data:${SOURCE_DATA_LAKE_DIR}"
+      - "${DATA_LAKE_DIR}/output:${OUTPUT_DIR}"
+
+    depends_on:
+      - mongo
+
+  mongo:
+    image: mongo:latest
+    container_name: mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+
+volumes:
+  mongo_data:
