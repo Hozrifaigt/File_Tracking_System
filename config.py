@@ -22,6 +22,14 @@ RESULTS_COLLECTION = os.getenv("RESULTS_COLLECTION", "results")
 
 POST_PROCESS_SCRIPT_PATH = os.getenv("POST_PROCESS_SCRIPT_PATH") # I did not change it yet in .env
 
+ALLOWED_EXTENSIONS = {
+    '.xlsx', '.xls',
+    '.docx', '.doc',
+    '.pptx', '.ppt',
+    '.txt', '.md',
+    '.pdf'
+}
+
 STATUS_PROCESSED = "processed"
 STATUS_DELETED = "deleted"
 STATUS_UPDATED = "updated"

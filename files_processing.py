@@ -91,6 +91,12 @@ async def process_pdf_file(original_file_path):
 
 async def process_other_file(original_file_path):
     try:
+        # Check file extension first
+        file_extension = os.path.splitext(original_file_path)[1].lower()
+        if file_extension not in config.ALLOWED_EXTENSIONS:
+            logger.info(f"Skipping file with unsupported extension: {original_file_path}")
+            return None
+
         if not os.path.exists(original_file_path):
             logger.error(f"File not found: {original_file_path}")
             return None
@@ -106,13 +112,14 @@ async def process_other_file(original_file_path):
             
         shutil.copy2(original_file_path, output_file_path)
         
-        # Add record to database
+        # Add record to database with file extension info
         file_data = {
             "directory": os.path.dirname(original_file_path),
             "file_path": original_file_path,
             "output_path": output_file_path,
             "status": config.STATUS_PROCESSED,
             "size": file_size,
+            "extension": file_extension,
             "modified": os.path.getmtime(original_file_path),
             "processed_date": datetime.utcnow()
         }
