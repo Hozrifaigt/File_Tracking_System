@@ -18,11 +18,103 @@ from utils import generate_unique_output_path
 from concurrent.futures import ProcessPoolExecutor
 from docling.document_converter import DocumentConverter
 
+# docling imports
+from pathlib import Path
+from docling.datamodel.base_models import InputFormat
+from docling.pipeline.simple_pipeline import SimplePipeline
+from docling.document_converter import (
+    DocumentConverter, 
+    PdfFormatOption, 
+    WordFormatOption
+)
+from docling.datamodel.pipeline_options import PdfPipelineOptions, TableFormerMode
+
+
 OCR_SEMAPHORE = Semaphore(MAX_CONCURRENT_TASKS)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+
+def check_gpu_availability():
+    """Check if GPU is available for processing"""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            logger.info("GPU detected and available for processing")
+            return True
+    except ImportError:
+        logger.info("Torch not available, GPU check failed")
+    return False
+
+async def process_pdf_with_docling(original_file_path):
+    """
+    Process PDF file using docling library with table extraction
+    """
+    absolute_pdf_path = os.path.abspath(original_file_path)
+    logger.info(f"Processing PDF file with docling: {absolute_pdf_path}")
+
+    try:
+        # Configure docling pipeline
+        pipeline_options = PdfPipelineOptions(
+            do_table_structure=True, 
+            do_ocr=True, 
+            do_cell_matching=True, 
+            use_gpu=True if check_gpu_availability() else False,
+        )
+        pipeline_options.table_structure_options.mode = TableFormerMode.ACCURATE
+
+        # Check GPU availability
+        try:
+            import torch
+            if torch.cuda.is_available():
+                pipeline_options.use_gpu = True
+                logger.info("GPU detected, using GPU acceleration for docling")
+        except ImportError:
+            logger.info("Torch not available, continuing with CPU processing")
+
+        doc_converter = DocumentConverter(
+            format_options={
+                InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options),
+                InputFormat.DOCX: WordFormatOption(pipeline_cls=SimplePipeline)
+            }
+        )
+
+        # Process the document
+        start_time = time.time()
+        result = doc_converter.convert(absolute_pdf_path)
+        duration = time.time() - start_time
+
+        # Generate output path for markdown content
+        output_filename = f"{os.path.splitext(os.path.basename(absolute_pdf_path))[0]}_docling.md"
+        output_path = os.path.join(config.OUTPUT_DIR, output_filename)
+        
+        # Save the markdown content
+        markdown_content = result.document.export_to_markdown()
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(markdown_content)
+
+        # Prepare file data for database
+        file_data = {
+            "directory": os.path.dirname(absolute_pdf_path),
+            "file_path": absolute_pdf_path,
+            "output_path": output_path,
+            "status": config.STATUS_PROCESSED,
+            "size": os.path.getsize(absolute_pdf_path),
+            "processed_date": datetime.utcnow(),
+            "processing_time": duration,
+            "processor": "docling"
+        }
+
+        # Save to database
+        await db_handler.insert_processed_file(file_data)
+        logger.info(f"Successfully processed file with docling: {absolute_pdf_path}")
+        return output_path
+
+    except Exception as e:
+        logger.error(f"Error during docling processing: {str(e)}")
+        return None
 
 def run_post_processing(original_pdf_path):
     if not config.POST_PROCESS_SCRIPT_PATH:
@@ -210,6 +302,12 @@ async def process_directory(directory_path: str) -> dict:
         "deleted_files": [],
         "errors": []
     }
+
+    # Check GPU availability once at the start
+    use_gpu = check_gpu_availability()
+    processor_func = process_pdf_file if use_gpu else process_pdf_with_docling
+    logger.info(f"Using {'GPU-accelerated' if use_gpu else 'CPU-based docling'} processing")
+
     
     try:
         # Get all current files in directory
@@ -246,7 +344,7 @@ async def process_directory(directory_path: str) -> dict:
                 # Start new tasks if capacity available
                 while len(active_tasks) < MAX_CONCURRENT_TASKS and not pdf_queue.empty():
                     pdf_file = await pdf_queue.get()
-                    task = asyncio.create_task(process_pdf_file(pdf_file))
+                    task = asyncio.create_task(processor_func(pdf_file))
                     active_tasks.add(task)
                     
                 # Wait for any task to complete
