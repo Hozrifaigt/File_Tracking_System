@@ -4,13 +4,21 @@ import time
 import utils
 import config 
 import shutil
+import asyncio
 import logging
 import subprocess
+import psutil
 
+from asyncio import Semaphore
 from datetime import datetime
+from config import MAX_WORKERS
 from db_handler import db_handler
+from config import MAX_CONCURRENT_TASKS
 from utils import generate_unique_output_path
+from concurrent.futures import ProcessPoolExecutor
+from docling.document_converter import DocumentConverter
 
+OCR_SEMAPHORE = Semaphore(MAX_CONCURRENT_TASKS)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -50,43 +58,78 @@ def run_post_processing(original_pdf_path):
         print(f"  [X] An unexpected Python error occurred during post-processing: {e}")
         return False
 
+def run_docling_command(pdf_path):
+    """Separate function for running docling command that can be pickled"""
+    command = ["docling", "--pipeline", "vlm", "--vlm-model", "smoldocling", pdf_path]
+    return subprocess.run(command, capture_output=True, text=True)
+
+
 
 async def process_pdf_file(original_file_path):
-    return None
+    """
+    Process PDF file optimized for H100 GPU
+    """
     absolute_pdf_path = os.path.abspath(original_file_path)
-    print(f"  Processing PDF: {os.path.basename(absolute_pdf_path)}")
+    logger.info(f"Processing PDF file: {absolute_pdf_path}")
 
-    command_to_run = ["docling", "--pipeline", "vlm", "--vlm-model", "smoldocling", absolute_pdf_path]
-    print(f"    Running OCR command: {' '.join(command_to_run)}")
-
-    start_time = time.time()
-    ocr_success = False
-    try:
-        result = subprocess.run(command_to_run, capture_output=False, text=True)
-        duration = time.time() - start_time
-        if result.returncode == 0:
-            print(f"    [✓] Docling OCR successfully processed in {duration:.2f} seconds.")
-            ocr_success = True
-        else:
-            print(f"    [!] Error processing with docling. Code: {result.returncode}. Took {duration:.2f}s")
-            ocr_success = False
-    except Exception as e:
-        duration = time.time() - start_time
-        print(f"\n    [X] Unexpected Python error during docling execution for {absolute_pdf_path}: {e}")
+    if not os.path.exists(absolute_pdf_path):
+        logger.error(f"PDF file not found: {absolute_pdf_path}")
+        return None
+        
+    if os.path.getsize(absolute_pdf_path) == 0:
+        logger.error(f"PDF file is empty: {absolute_pdf_path}")
         return None
 
-    post_process_success = False
-    if ocr_success:
-        post_process_success = run_post_processing(absolute_pdf_path)
-    else:
-        print("    Skipping post-processing due to OCR error.")
+    async with OCR_SEMAPHORE:
+        try:
+            logger.info(f"Starting GPU-accelerated PDF processing: {os.path.basename(absolute_pdf_path)}")
+            start_time = time.time()
+            
+            # Use docling CLI command with GPU acceleration
+            result = await asyncio.create_subprocess_exec(
+                "docling",
+                "--pipeline", "vlm",
+                "--vlm-model", "smoldocling",
+                "--device", "cuda",
+                absolute_pdf_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            stdout, stderr = await result.communicate()
+            duration = time.time() - start_time
+            
+            if result.returncode == 0:
+                logger.info(f"GPU-accelerated OCR completed in {duration:.2f} seconds")
+                
+                # Run post-processing
+                post_process_success = await run_post_processing(absolute_pdf_path)
+                
+                if post_process_success:
+                    file_data = {
+                        "directory": os.path.dirname(absolute_pdf_path),
+                        "file_path": absolute_pdf_path,
+                        "status": config.STATUS_PROCESSED,
+                        "size": os.path.getsize(absolute_pdf_path),
+                        "extension": ".pdf",
+                        "modified": os.path.getmtime(absolute_pdf_path),
+                        "processed_date": datetime.utcnow(),
+                        "processing_time": duration,
+                        "ocr_output": stdout.decode()
+                    }
+                    
+                    await db_handler.insert_processed_file(file_data)
+                    return absolute_pdf_path
+                    
+            else:
+                logger.error(f"GPU-accelerated OCR failed: {stderr.decode()}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error during GPU-accelerated processing: {str(e)}")
+            return None
 
-    if ocr_success: # and post_process_success:
-         print(f"  [✓] PDF processed successfully: {os.path.basename(absolute_pdf_path)}")
-         return absolute_pdf_path # Return original path
-    else:
-         print(f"  [!] PDF processing failed or post-processing failed for: {os.path.basename(absolute_pdf_path)}")
-         return None
+    return None
 
 
 async def process_other_file(original_file_path):
@@ -135,6 +178,7 @@ async def process_other_file(original_file_path):
         return None
 
 async def process_directory(directory_path: str) -> dict:
+    """Process directory with controlled concurrency"""
     report = {
         "processed_files": [],
         "skipped_files": [],
@@ -145,74 +189,97 @@ async def process_directory(directory_path: str) -> dict:
     try:
         # Get all current files in directory
         current_files = set()
+        pdf_files = []
+        other_files = []
+        
         for root, _, files in os.walk(directory_path):
             for filename in files:
                 if not filename.startswith(config.IGNORED_PREFIXES):
-                    current_files.add(os.path.join(root, filename))
+                    file_path = os.path.join(root, filename)
+                    current_files.add(file_path)
+                    if filename.lower().endswith(config.PDF_EXTENSION):
+                        pdf_files.append(file_path)
+                    else:
+                        other_files.append(file_path)
 
-        # Check for deleted files
+        # Process PDFs in controlled batches
+        if pdf_files:
+            BATCH_SIZE = 5  # Process 5 PDFs at a time
+            for i in range(0, len(pdf_files), BATCH_SIZE):
+                batch = pdf_files[i:i + BATCH_SIZE]
+                logger.info(f"Processing batch of {len(batch)} PDFs ({i+1} to {i+len(batch)} of {len(pdf_files)})")
+                
+                # Create tasks for current batch
+                tasks = [process_pdf_file(pdf_file) for pdf_file in batch]
+                batch_results = await asyncio.gather(*tasks)
+                
+                # Process batch results
+                for pdf_file, result in zip(batch, batch_results):
+                    if result:
+                        report["processed_files"].append({
+                            "path": pdf_file,
+                            "output": result
+                        })
+                        logger.info(f"Successfully processed: {os.path.basename(pdf_file)}")
+                    else:
+                        report["errors"].append({
+                            "path": pdf_file,
+                            "error": "PDF processing failed"
+                        })
+                        logger.error(f"Failed to process: {os.path.basename(pdf_file)}")
+                
+                # Add a small delay between batches to prevent resource exhaustion
+                if i + BATCH_SIZE < len(pdf_files):
+                    await asyncio.sleep(2)
+                    
+                # Check system resources
+                memory = psutil.virtual_memory()
+                if memory.percent > 85:
+                    logger.warning(f"High memory usage ({memory.percent}%). Waiting before next batch...")
+                    await asyncio.sleep(10)
+
+        # Process other files
+        for file_path in other_files:
+            try:
+                result = await process_other_file(file_path)
+                if result:
+                    report["processed_files"].append({
+                        "path": file_path,
+                        "output": result
+                    })
+                    logger.info(f"Successfully processed non-PDF: {os.path.basename(file_path)}")
+            except Exception as e:
+                report["errors"].append({
+                    "path": file_path,
+                    "error": str(e)
+                })
+                logger.error(f"Failed to process non-PDF: {os.path.basename(file_path)}")
+
+        # Handle deleted files
         stored_files = await db_handler.get_all_processed_files()
         stored_file_paths = {file["file_path"] for file in stored_files}
-        
-        # Find deleted files (files in DB but not in filesystem)
         deleted_files = stored_file_paths - current_files
+        
         for deleted_file in deleted_files:
             await db_handler.update_file_status(deleted_file, config.STATUS_DELETED)
             report["deleted_files"].append({
                 "path": deleted_file,
                 "reason": "File no longer exists"
             })
+            logger.info(f"Marked as deleted: {os.path.basename(deleted_file)}")
 
-        # Process current files
-        for file_path in current_files:
-            try:
-                # Check if file was previously marked as deleted
-                stored_file = await db_handler.get_processed_file(file_path)
-                current_size = os.path.getsize(file_path)
-                
-                if stored_file:
-                    if stored_file["status"] == config.STATUS_DELETED:
-                        # File was previously deleted but exists now - reprocess it
-                        if file_path.lower().endswith(config.PDF_EXTENSION):
-                            result = await process_pdf_file(file_path)
-                        else:
-                            result = await process_other_file(file_path)
-                            
-                        if result:
-                            report["processed_files"].append({
-                                "path": file_path,
-                                "output": result
-                            })
-                    elif stored_file["size"] == current_size:
-                        # File exists and hasn't changed
-                        report["skipped_files"].append({
-                            "path": file_path,
-                            "reason": "File already processed"
-                        })
-                        continue
-                else:
-                    # New file
-                    if file_path.lower().endswith(config.PDF_EXTENSION):
-                        result = await process_pdf_file(file_path)
-                    else:
-                        result = await process_other_file(file_path)
-                        
-                    if result:
-                        report["processed_files"].append({
-                            "path": file_path,
-                            "output": result
-                        })
-                    
-            except Exception as e:
-                report["errors"].append({
-                    "path": file_path,
-                    "error": str(e)
-                })
-                    
     except Exception as e:
+        error_msg = f"Directory processing error: {str(e)}"
         report["errors"].append({
             "path": directory_path,
-            "error": f"Directory processing error: {str(e)}"
+            "error": error_msg
         })
+        logger.error(error_msg, exc_info=True)
+    
+    # Log summary
+    logger.info(f"Processing complete. "
+                f"Processed: {len(report['processed_files'])}, "
+                f"Errors: {len(report['errors'])}, "
+                f"Deleted: {len(report['deleted_files'])}")
         
     return report

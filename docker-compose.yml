@@ -3,6 +3,7 @@ services:
     build: .
     ports:
       - "8080:8080"
+    runtime: nvidia
     environment:
       - MONGO_URI=mongodb://mongo:27017/
       - DB_NAME=${DB_NAME}
@@ -14,9 +15,15 @@ services:
       - .:/app
       - "${DATA_LAKE_DIR}/data:${SOURCE_DATA_LAKE_DIR}"
       - "${DATA_LAKE_DIR}/output:${OUTPUT_DIR}"
-
     depends_on:
       - mongo
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
   mongo:
     image: mongo:latest
