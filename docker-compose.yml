@@ -14,17 +14,33 @@ services:
       - .:/app
       - "${DATA_LAKE_DIR}/data:${SOURCE_DATA_LAKE_DIR}"
       - "${DATA_LAKE_DIR}/output:${OUTPUT_DIR}"
-
     depends_on:
-      - mongo
+      mongo:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu, utility, compute]
 
   mongo:
     image: mongo:latest
     container_name: mongo
+    user: "1001:1001"  # Add this line
     ports:
       - "27017:27017"
     volumes:
       - "${DATA_LAKE_DIR}/db:/data/db"
+    restart: always
+    healthcheck:
+      test: mongosh --eval "db.adminCommand('ping')"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
 volumes:
   mongo_data:
