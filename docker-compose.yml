@@ -29,7 +29,7 @@ services:
   mongo:
     image: mongo:latest
     container_name: mongo
-    user: "1001:1001"  # Add this line
+    user: "1001:1001"
     ports:
       - "27017:27017"
     volumes:
