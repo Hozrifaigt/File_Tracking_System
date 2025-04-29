@@ -72,6 +72,17 @@ async def process_pdf_file(original_file_path):
     absolute_pdf_path = os.path.abspath(original_file_path)
     logger.info(f"Processing PDF file: {absolute_pdf_path}")
 
+<<<<<<< HEAD
+=======
+    # Generate output path for markdown file
+    # output_filename = f"{os.path.splitext(os.path.basename(absolute_pdf_path))[0]}_output.md"
+    # output_path = os.path.join(config.OUTPUT_DIR, output_filename)
+
+    # # Ensure output directory exists
+    # os.makedirs(config.OUTPUT_DIR, exist_ok=True)
+
+    # Validate input file
+>>>>>>> 1868342922638995b197ca180ef514a40f999b77
     if not os.path.exists(absolute_pdf_path):
         logger.error(f"PDF file not found: {absolute_pdf_path}")
         return None
@@ -100,6 +111,7 @@ async def process_pdf_file(original_file_path):
             duration = time.time() - start_time
             
             if result.returncode == 0:
+<<<<<<< HEAD
                 logger.info(f"GPU-accelerated OCR completed in {duration:.2f} seconds")
                 
                 # Run post-processing
@@ -130,6 +142,55 @@ async def process_pdf_file(original_file_path):
             return None
 
     return None
+=======
+                # Save output to markdown file
+                # ocr_output = stdout.decode()
+                # try:
+                #     # with open(output_path, 'w', encoding='utf-8') as f:
+                #     #     f.write(ocr_output)
+                #     # logger.info(f"Output saved to: {output_path}")
+                # except Exception as e:
+                #     logger.error(f"Failed to save output file: {str(e)}")
+                #     return None
+
+                logger.info(f"GPU-accelerated processing completed in {duration:.2f} seconds")
+
+                # Prepare file data for database
+                file_data = {
+                    "directory": os.path.dirname(absolute_pdf_path),
+                    "file_path": absolute_pdf_path,
+                    # "output_path": output_path,
+                    "status": config.STATUS_PROCESSED,
+                    "size": os.path.getsize(absolute_pdf_path),
+                    "processed_date": datetime.utcnow(),
+                    "processing_time": duration
+                }
+
+                # Retry logic for database insertion
+                max_retries = 3
+                retry_delay = 5
+                for attempt in range(max_retries):
+                    try:
+                        await db_handler.insert_processed_file(file_data)
+                        logger.info(f"Successfully inserted file data for: {absolute_pdf_path}")
+                        return absolute_pdf_path
+                    except Exception as db_error:
+                        if attempt < max_retries - 1:
+                            logger.warning(f"Database insertion failed (attempt {attempt + 1}/{max_retries}): {str(db_error)}")
+                            await asyncio.sleep(retry_delay)
+                        else:
+                            logger.error(f"All database insertion attempts failed for: {absolute_pdf_path}")
+                            return None
+                    
+            else:
+                error_msg = stderr.decode()
+                logger.error(f"GPU-accelerated OCR failed: {error_msg}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error during GPU-accelerated processing: {str(e)}")
+            return None
+>>>>>>> 1868342922638995b197ca180ef514a40f999b77
 
 
 async def process_other_file(original_file_path):
@@ -178,7 +239,11 @@ async def process_other_file(original_file_path):
         return None
 
 async def process_directory(directory_path: str) -> dict:
+<<<<<<< HEAD
     """Process directory with controlled concurrency"""
+=======
+    """Process directory with continuous processing and dynamic GPU utilization"""
+>>>>>>> 1868342922638995b197ca180ef514a40f999b77
     report = {
         "processed_files": [],
         "skipped_files": [],
@@ -192,6 +257,10 @@ async def process_directory(directory_path: str) -> dict:
         pdf_files = []
         other_files = []
         
+<<<<<<< HEAD
+=======
+        # Scan directory for files
+>>>>>>> 1868342922638995b197ca180ef514a40f999b77
         for root, _, files in os.walk(directory_path):
             for filename in files:
                 if not filename.startswith(config.IGNORED_PREFIXES):
@@ -202,6 +271,7 @@ async def process_directory(directory_path: str) -> dict:
                     else:
                         other_files.append(file_path)
 
+<<<<<<< HEAD
         # Process PDFs in controlled batches
         if pdf_files:
             BATCH_SIZE = 5  # Process 5 PDFs at a time
@@ -237,6 +307,65 @@ async def process_directory(directory_path: str) -> dict:
                 if memory.percent > 85:
                     logger.warning(f"High memory usage ({memory.percent}%). Waiting before next batch...")
                     await asyncio.sleep(10)
+=======
+        # Process PDFs with continuous processing
+        if pdf_files:
+            total_pdfs = len(pdf_files)
+            logger.info(f"Found {total_pdfs} PDF files to process")
+            
+            # Create a queue for PDF processing
+            pdf_queue = asyncio.Queue()
+            for pdf in pdf_files:
+                await pdf_queue.put(pdf)
+            
+            # Track active tasks
+            active_tasks = set()
+            processed_count = 0
+            
+            while not pdf_queue.empty() or active_tasks:
+                # Start new tasks if capacity available
+                while len(active_tasks) < MAX_CONCURRENT_TASKS and not pdf_queue.empty():
+                    pdf_file = await pdf_queue.get()
+                    task = asyncio.create_task(process_pdf_file(pdf_file))
+                    active_tasks.add(task)
+                    
+                # Wait for any task to complete
+                if active_tasks:
+                    done, pending = await asyncio.wait(
+                        active_tasks, 
+                        return_when=asyncio.FIRST_COMPLETED
+                    )
+                    
+                    # Process completed tasks
+                    for task in done:
+                        active_tasks.remove(task)
+                        try:
+                            result = await task
+                            processed_count += 1
+                            
+                            if result:
+                                report["processed_files"].append({
+                                    "path": result,
+                                    "output": result
+                                })
+                                logger.info(f"Processed {processed_count}/{total_pdfs}: {os.path.basename(result)}")
+                            else:
+                                report["errors"].append({
+                                    "path": result if result else "Unknown",
+                                    "error": "PDF processing failed"
+                                })
+                        except Exception as e:
+                            logger.error(f"Task failed: {str(e)}")
+                            report["errors"].append({
+                                "error": str(e)
+                            })
+                
+                # Check system resources
+                memory = psutil.virtual_memory()
+                if memory.percent > 85:
+                    logger.warning(f"High memory usage ({memory.percent}%). Brief pause...")
+                    await asyncio.sleep(5)
+>>>>>>> 1868342922638995b197ca180ef514a40f999b77
 
         # Process other files
         for file_path in other_files:
@@ -247,13 +376,19 @@ async def process_directory(directory_path: str) -> dict:
                         "path": file_path,
                         "output": result
                     })
+<<<<<<< HEAD
                     logger.info(f"Successfully processed non-PDF: {os.path.basename(file_path)}")
+=======
+>>>>>>> 1868342922638995b197ca180ef514a40f999b77
             except Exception as e:
                 report["errors"].append({
                     "path": file_path,
                     "error": str(e)
                 })
+<<<<<<< HEAD
                 logger.error(f"Failed to process non-PDF: {os.path.basename(file_path)}")
+=======
+>>>>>>> 1868342922638995b197ca180ef514a40f999b77
 
         # Handle deleted files
         stored_files = await db_handler.get_all_processed_files()

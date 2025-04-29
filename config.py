@@ -22,7 +22,7 @@ DB_NAME = os.getenv("DB_NAME", "file_tracker_db")
 COLLECTION_NAME = os.getenv("COLLECTION_NAME", "processed_files")
 RESULTS_COLLECTION = os.getenv("RESULTS_COLLECTION", "results")
 
-MAX_CONCURRENT_TASKS = 8 
+MAX_CONCURRENT_TASKS = 20
 
 POST_PROCESS_SCRIPT_PATH = os.getenv("POST_PROCESS_SCRIPT_PATH") # I did not change it yet in .env
 
