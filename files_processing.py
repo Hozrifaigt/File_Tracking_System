@@ -41,8 +41,28 @@ async def process_pdf_traditional(original_file_path):
     """
     Process PDF file using docling library with table extraction
     """
+
     absolute_pdf_path = os.path.abspath(original_file_path)
     logger.info(f"Processing PDF file with docling: {absolute_pdf_path}")
+
+    if "tax" in os.path.dirname(absolute_pdf_path).lower():
+        logger.info(f"File is in a TAX folder; skipping OCR and moving file: {absolute_pdf_path}")
+        output_file_path = utils.generate_unique_output_path(absolute_pdf_path, config.OUTPUT_DIR)
+        os.makedirs(os.path.dirname(output_file_path), exist_ok=True)
+        shutil.copy2(absolute_pdf_path, output_file_path)
+        
+        # Record the operation in the database
+        file_data = {
+            "directory": os.path.dirname(absolute_pdf_path),
+            "file_path": absolute_pdf_path,
+            "output_path": output_file_path,
+            "status": config.STATUS_PROCESSED,
+            "size": os.path.getsize(absolute_pdf_path),
+            "processed_date": datetime.utcnow(),
+            "ocr_version": "skipped"
+        }
+        await db_handler.insert_processed_file(file_data)
+        return output_file_path
 
     is_gpu_available = check_gpu_availability()
 
@@ -148,6 +168,26 @@ async def process_pdf_vlm(original_file_path):
     """
     absolute_pdf_path = os.path.abspath(original_file_path)
     logger.info(f"Processing PDF file: {absolute_pdf_path}")
+
+    if "tax" in os.path.dirname(absolute_pdf_path).lower():
+        logger.info(f"File is in a TAX folder; skipping OCR and moving file: {absolute_pdf_path}")
+        output_file_path = utils.generate_unique_output_path(absolute_pdf_path, config.OUTPUT_DIR)
+        os.makedirs(os.path.dirname(output_file_path), exist_ok=True)
+        shutil.copy2(absolute_pdf_path, output_file_path)
+        
+        # Record the operation in the database
+        file_data = {
+            "directory": os.path.dirname(absolute_pdf_path),
+            "file_path": absolute_pdf_path,
+            "output_path": output_file_path,
+            "status": config.STATUS_PROCESSED,
+            "size": os.path.getsize(absolute_pdf_path),
+            "processed_date": datetime.utcnow(),
+            "ocr_version": "skipped"
+        }
+        await db_handler.insert_processed_file(file_data)
+        return output_file_path
+        
 
     # Generate output path for markdown file
     # output_filename = f"{os.path.splitext(os.path.basename(absolute_pdf_path))[0]}_output.md"

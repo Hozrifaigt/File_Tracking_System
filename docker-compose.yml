@@ -18,18 +18,17 @@ services:
       mongo:
         condition: service_healthy
     restart: unless-stopped
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu, utility, compute]
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu, utility, compute]
 
   mongo:
     image: mongo:latest
     container_name: mongo
-    user: "1001:1001"
     ports:
       - "27017:27017"
     volumes:

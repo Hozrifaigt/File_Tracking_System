@@ -16,7 +16,6 @@ from utils import clean_output_folders
 from contextlib import asynccontextmanager
 from files_processing import process_directory
 from fastapi import FastAPI, BackgroundTasks, HTTPException
-from files_processing import process_pdf_file, process_other_file
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
