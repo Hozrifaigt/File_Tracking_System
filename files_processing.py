@@ -14,9 +14,9 @@ from asyncio import Semaphore
 from datetime import datetime
 from db_handler import db_handler
 from config import MAX_CONCURRENT_TASKS
-from utils import generate_unique_output_path
 from concurrent.futures import ProcessPoolExecutor
 from docling.document_converter import DocumentConverter
+from utils import generate_unique_output_path, check_gpu_availability
 
 # docling imports
 from pathlib import Path
@@ -36,23 +36,15 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
-def check_gpu_availability():
-    """Check if GPU is available for processing"""
-    try:
-        import torch
-        if torch.cuda.is_available():
-            logger.info("GPU detected and available for processing")
-            return True
-    except ImportError:
-        logger.info("Torch not available, GPU check failed")
-    return False
 
-async def process_pdf_with_docling(original_file_path):
+async def process_pdf_traditional(original_file_path):
     """
     Process PDF file using docling library with table extraction
     """
     absolute_pdf_path = os.path.abspath(original_file_path)
     logger.info(f"Processing PDF file with docling: {absolute_pdf_path}")
+
+    is_gpu_available = check_gpu_availability()
 
     try:
         # Configure docling pipeline
@@ -60,23 +52,21 @@ async def process_pdf_with_docling(original_file_path):
             do_table_structure=True, 
             do_ocr=True, 
             do_cell_matching=True, 
-            use_gpu=True if check_gpu_availability() else False,
+            use_gpu=True if is_gpu_available else False,
         )
         pipeline_options.table_structure_options.mode = TableFormerMode.ACCURATE
 
-        # Check GPU availability
-        try:
-            import torch
-            if torch.cuda.is_available():
-                pipeline_options.use_gpu = True
-                logger.info("GPU detected, using GPU acceleration for docling")
-        except ImportError:
-            logger.info("Torch not available, continuing with CPU processing")
+        # Check GPU availabili
+
+        if is_gpu_available:
+            logger.info("GPU detected, using GPU acceleration for docling")
+        else:
+            logger.info("No GPU detected, using CPU for docling processing")
 
         doc_converter = DocumentConverter(
             format_options={
                 InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options),
-                InputFormat.DOCX: WordFormatOption(pipeline_cls=SimplePipeline)
+                # InputFormat.DOCX: WordFormatOption(pipeline_cls=SimplePipeline)
             }
         )
 
@@ -86,7 +76,7 @@ async def process_pdf_with_docling(original_file_path):
         duration = time.time() - start_time
 
         # Generate output path for markdown content
-        output_filename = f"{os.path.splitext(os.path.basename(absolute_pdf_path))[0]}_docling.md"
+        output_filename = f"{os.path.splitext(os.path.basename(absolute_pdf_path))[0]}.md"
         output_path = os.path.join(config.OUTPUT_DIR, output_filename)
         
         # Save the markdown content
@@ -103,6 +93,7 @@ async def process_pdf_with_docling(original_file_path):
             "status": config.STATUS_PROCESSED,
             "size": os.path.getsize(absolute_pdf_path),
             "processed_date": datetime.utcnow(),
+            "ocr_version": "docling_light",
             "processing_time": duration,
             "processor": "docling"
         }
@@ -150,14 +141,8 @@ def run_post_processing(original_pdf_path):
         print(f"  [X] An unexpected Python error occurred during post-processing: {e}")
         return False
 
-def run_docling_command(pdf_path):
-    """Separate function for running docling command that can be pickled"""
-    command = ["docling", "--pipeline", "vlm", "--vlm-model", "smoldocling", pdf_path]
-    return subprocess.run(command, capture_output=True, text=True)
 
-
-
-async def process_pdf_file(original_file_path):
+async def process_pdf_vlm(original_file_path):
     """
     Process PDF file optimized for H100 GPU
     """
@@ -295,7 +280,7 @@ async def process_other_file(original_file_path):
         return None
 
 async def process_directory(directory_path: str) -> dict:
-    """Process directory with continuous processing and dynamic GPU utilization"""
+    """Process directory with continuous processing and dynamic CPU/GPU utilization"""
     report = {
         "processed_files": [],
         "skipped_files": [],
@@ -303,18 +288,26 @@ async def process_directory(directory_path: str) -> dict:
         "errors": []
     }
 
-    # Check GPU availability once at the start
+    # Check for GPU availability once at the start
     use_gpu = check_gpu_availability()
-    processor_func = process_pdf_file if use_gpu else process_pdf_with_docling
-    logger.info(f"Using {'GPU-accelerated' if use_gpu else 'CPU-based docling'} processing")
-
     
+    # Select OCR model based on env variable OCR_MODEL (either "VLM" or "traditional")
+    ocr_model = config.OCR_MODEL.lower() if hasattr(config, "OCR_MODEL") else "traditional"
+    if ocr_model == "vlm":
+        processor_func = process_pdf_vlm
+        logger.info("Selected OCR model: VLM")
+    else:
+        processor_func = process_pdf_traditional
+        logger.info("Selected OCR model: traditional")
+
+    logger.info(f"Using {'GPU' if use_gpu else 'CPU'}-based processing with {ocr_model.upper()} model")
+
     try:
         # Get all current files in directory
         current_files = set()
         pdf_files = []
         other_files = []
-        
+
         # Scan directory for files
         for root, _, files in os.walk(directory_path):
             for filename in files:
@@ -330,37 +323,43 @@ async def process_directory(directory_path: str) -> dict:
         if pdf_files:
             total_pdfs = len(pdf_files)
             logger.info(f"Found {total_pdfs} PDF files to process")
-            
+
             # Create a queue for PDF processing
             pdf_queue = asyncio.Queue()
             for pdf in pdf_files:
                 await pdf_queue.put(pdf)
-            
+
             # Track active tasks
             active_tasks = set()
             processed_count = 0
-            
+
             while not pdf_queue.empty() or active_tasks:
+                # If running on CPU, adjust concurrent tasks based on CPU load.
+                if not use_gpu:
+                    cpu_usage = psutil.cpu_percent(interval=0.1)
+                    dynamic_limit = MAX_CONCURRENT_TASKS if cpu_usage < 50 else max(1, int(MAX_CONCURRENT_TASKS * (1 - cpu_usage / 100)))
+                    concurrency_limit = dynamic_limit
+                    logger.debug(f"CPU usage: {cpu_usage}%, concurrency limit adjusted to: {concurrency_limit}")
+                else:
+                    concurrency_limit = MAX_CONCURRENT_TASKS
+
                 # Start new tasks if capacity available
-                while len(active_tasks) < MAX_CONCURRENT_TASKS and not pdf_queue.empty():
+                while len(active_tasks) < concurrency_limit and not pdf_queue.empty():
                     pdf_file = await pdf_queue.get()
                     task = asyncio.create_task(processor_func(pdf_file))
                     active_tasks.add(task)
-                    
+
                 # Wait for any task to complete
                 if active_tasks:
-                    done, pending = await asyncio.wait(
-                        active_tasks, 
-                        return_when=asyncio.FIRST_COMPLETED
-                    )
-                    
+                    done, _ = await asyncio.wait(active_tasks, return_when=asyncio.FIRST_COMPLETED)
+
                     # Process completed tasks
                     for task in done:
                         active_tasks.remove(task)
                         try:
                             result = await task
                             processed_count += 1
-                            
+
                             if result:
                                 report["processed_files"].append({
                                     "path": result,
@@ -377,8 +376,8 @@ async def process_directory(directory_path: str) -> dict:
                             report["errors"].append({
                                 "error": str(e)
                             })
-                
-                # Check system resources
+
+                # Check system memory periodically
                 memory = psutil.virtual_memory()
                 if memory.percent > 85:
                     logger.warning(f"High memory usage ({memory.percent}%). Brief pause...")
@@ -403,7 +402,7 @@ async def process_directory(directory_path: str) -> dict:
         stored_files = await db_handler.get_all_processed_files()
         stored_file_paths = {file["file_path"] for file in stored_files}
         deleted_files = stored_file_paths - current_files
-        
+
         for deleted_file in deleted_files:
             await db_handler.update_file_status(deleted_file, config.STATUS_DELETED)
             report["deleted_files"].append({
@@ -418,11 +417,6 @@ async def process_directory(directory_path: str) -> dict:
             "error": error_msg
         })
         logger.error(error_msg, exc_info=True)
-    
-    # Log summary
-    logger.info(f"Processing complete. "
-                f"Processed: {len(report['processed_files'])}, "
-                f"Errors: {len(report['errors'])}, "
-                f"Deleted: {len(report['deleted_files'])}")
-        
+
+    logger.info(f"Processing complete. Processed: {len(report['processed_files'])}, Errors: {len(report['errors'])}, Deleted: {len(report['deleted_files'])}")
     return report

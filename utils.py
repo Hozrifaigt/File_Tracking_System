@@ -79,3 +79,14 @@ def clean_output_folders(output_dir: str) -> None:
     except Exception as e:
         logger.error(f"Error cleaning output directory {output_dir}: {str(e)}")
         raise
+
+def check_gpu_availability():
+    """Check if GPU is available for processing"""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            logger.info("GPU detected and available for processing")
+            return True
+    except ImportError:
+        logger.info("Torch not available, GPU check failed")
+    return False
